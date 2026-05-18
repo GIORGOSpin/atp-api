@@ -574,7 +574,8 @@ def _parse_tennisratio(html: str, name: str) -> dict:
     if age_match:
         birth_year = int(age_match.group(1))
         from datetime import datetime
-        age = round(datetime.now().year - birth_year + 0.5, 1)
+        current_year = datetime.now().year
+        age = round(current_year - birth_year + 0.5, 1) if 1970 < birth_year < current_year else 26.0
     else:
         age = 26.0
 
