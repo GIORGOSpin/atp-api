@@ -462,3 +462,162 @@ def model_info():
             reverse=True
         )[:15],
     }
+
+    # ── ADD THIS TO THE BOTTOM OF YOUR main.py ────────────────────────────────
+# Player stats scraper — fetches from tennisratio.com and ATP rankings
+
+import re
+import urllib.request
+from urllib.parse import quote
+
+@app.get("/player/{name}")
+def get_player_stats(name: str):
+    """
+    Fetch current player stats by name.
+    Usage: GET /player/CarlosAlcaraz or /player/Carlos%20Alcaraz
+    Returns rank, Elo, win rates, surface stats ready for the predict endpoint.
+    """
+    try:
+        # Format name for URL (remove spaces, keep capitals)
+        clean = name.strip().replace(' ', '')
+        url = f"https://www.tennisratio.com/players/{clean}.html"
+
+        req = urllib.request.Request(url, headers={
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        })
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            html = resp.read().decode('utf-8', errors='ignore')
+
+        stats = _parse_tennisratio(html, name)
+        return stats
+
+    except Exception as e:
+        # Return safe defaults if scraping fails
+        return {
+            "name": name,
+            "found": False,
+            "error": str(e),
+            "rank": 50,
+            "rank_points": 900.0,
+            "elo": 1800.0,
+            "elo_surface": 1800.0,
+            "age": 26.0,
+            "height": 185,
+            "win_rate_long": 0.60,
+            "win_rate_short": 0.60,
+            "surface_wr": 0.60,
+            "days_rest": 3,
+            "fatigue": 0.1,
+        }
+
+
+def _parse_tennisratio(html: str, name: str) -> dict:
+    """Parse tennisratio.com player page for the stats we need."""
+
+    def find(pattern, default=None):
+        m = re.search(pattern, html, re.IGNORECASE | re.DOTALL)
+        return m.group(1).strip() if m else default
+
+    def find_float(pattern, default=0.0):
+        try:
+            v = find(pattern)
+            return float(v.replace('%','').replace(',','')) if v else default
+        except:
+            return default
+
+    # Rank
+    rank = int(find_float(r'ranked world No\.\s*(\d+)', 50))
+
+    # Win rates — look for "past 10 matches" and "past 52 weeks"
+    wr_52 = find_float(r'past 52 weeks.*?(\d+\.\d+)%\s*win rate', 60.0) / 100
+    wr_10_raw = find(r'past 10 matches.*?(\d+)-(\d+)\s*record')
+    if wr_10_raw:
+        m = re.search(r'past 10 matches.*?(\d+)-(\d+)\s*record', html, re.IGNORECASE)
+        if m:
+            w, l = int(m.group(1)), int(m.group(2))
+            wr_10 = w / max(w + l, 1)
+        else:
+            wr_10 = wr_52
+    else:
+        wr_10 = wr_52
+
+    # Surface win rate — try to find clay/hard/grass based on surface
+    # We return all three and let the caller pick the right one
+    clay_rec = re.search(r'clay.*?(\d+)-(\d+)', html, re.IGNORECASE)
+    hard_rec = re.search(r'hard.*?(\d+)-(\d+)', html, re.IGNORECASE)
+    grass_rec = re.search(r'grass.*?(\d+)-(\d+)', html, re.IGNORECASE)
+
+    def wr_from_rec(m):
+        if not m: return 0.60
+        w, l = int(m.group(1)), int(m.group(2))
+        return round(w / max(w + l, 1), 3)
+
+    clay_wr  = wr_from_rec(clay_rec)
+    hard_wr  = wr_from_rec(hard_rec)
+    grass_wr = wr_from_rec(grass_rec)
+
+    # Elo — tennisratio shows ELO score (different scale, ~10000-13000)
+    # We map it back to standard ~1500-2300 scale
+    elo_raw = find_float(r'ELO score of ([\d,]+)', 0)
+    if elo_raw > 5000:
+        # tennisratio uses a different scale, normalize to ~1500-2300
+        elo = round(1500 + (elo_raw - 8000) / 20, 0)
+        elo = max(1200, min(2400, elo))
+    elif elo_raw > 0:
+        elo = elo_raw
+    else:
+        # Estimate from rank
+        elo = max(1200, 2300 - (rank * 4))
+
+    # Age — look for birth year or age mentions
+    age_match = re.search(r'born.*?(\d{4})', html, re.IGNORECASE)
+    if age_match:
+        birth_year = int(age_match.group(1))
+        from datetime import datetime
+        age = round(datetime.now().year - birth_year + 0.5, 1)
+    else:
+        age = 26.0
+
+    # Days rest — check when last match was
+    last_match = find(r'last match was (\d+) (?:day|week|month)', None)
+    if last_match:
+        n = int(last_match)
+        unit = find(r'last match was \d+ (day|week|month)', 'day')
+        if 'week' in unit: days_rest = n * 7
+        elif 'month' in unit: days_rest = n * 30
+        else: days_rest = n
+    else:
+        days_rest = 3
+
+    # Rank points — estimate from rank if not found directly
+    rank_points_map = {
+        1: 11000, 2: 9000, 3: 7500, 4: 6500, 5: 5800,
+        10: 3800, 20: 2200, 30: 1600, 50: 1000, 100: 500
+    }
+    rank_pts = 500.0
+    for r_threshold in sorted(rank_points_map.keys()):
+        if rank <= r_threshold:
+            rank_pts = float(rank_points_map[r_threshold])
+            break
+
+    return {
+        "name": name,
+        "found": True,
+        "rank": rank,
+        "rank_points": rank_pts,
+        "elo": float(elo),
+        "elo_surface": float(elo),  # caller adjusts per surface
+        "age": age,
+        "height": 185,  # not on tennisratio, user fills manually
+        "win_rate_long": round(wr_52, 3),
+        "win_rate_short": round(wr_10, 3),
+        "surface_wr": {
+            "Clay": clay_wr,
+            "Hard": hard_wr,
+            "Grass": grass_wr,
+            "Carpet": round((hard_wr + 0.60) / 2, 3),
+        },
+        "days_rest": min(days_rest, 14),
+        "fatigue": round(max(0, 0.3 - (days_rest * 0.05)), 2),
+        "source": "tennisratio.com",
+    }
