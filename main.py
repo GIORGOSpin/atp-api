@@ -622,3 +622,90 @@ def _parse_tennisratio(html: str, name: str) -> dict:
         "fatigue": round(max(0, 0.3 - (days_rest * 0.05)), 2),
         "source": "tennisratio.com",
     }
+
+    # ── ADD THIS TO THE BOTTOM OF YOUR main.py ────────────────────────────────
+# Match storage — admin saves matches here, app reads them
+
+import os
+
+MATCHES_FILE = "matches_store.json"
+
+def load_matches() -> list:
+    if not os.path.exists(MATCHES_FILE):
+        return []
+    with open(MATCHES_FILE, "r") as f:
+        return json.load(f)
+
+def save_matches(matches: list):
+    with open(MATCHES_FILE, "w") as f:
+        json.dump(matches, f, indent=2)
+
+
+@app.get("/matches")
+def get_matches(tourney: str = None, signal: str = None, surface: str = None):
+    """
+    App calls this to get all matches.
+    Optional filters: ?tourney=Hamburg&signal=green&surface=Clay
+    """
+    matches = load_matches()
+    if tourney:
+        matches = [m for m in matches if tourney.lower() in m.get("tourney","").lower()]
+    if signal:
+        matches = [m for m in matches if m.get("signal") == signal]
+    if surface:
+        matches = [m for m in matches if m.get("surface","").lower() == surface.lower()]
+    return matches
+
+
+@app.post("/matches")
+def save_matches_endpoint(matches: list[dict]):
+    """
+    Admin panel calls this to save all matches for a tournament.
+    Replaces existing matches for the same tournament name.
+    """
+    existing = load_matches()
+
+    # Get tournament names being updated
+    incoming_tourneys = set(m.get("tourney", "") for m in matches)
+
+    # Remove old matches for those tournaments
+    existing = [m for m in existing if m.get("tourney", "") not in incoming_tourneys]
+
+    # Add new matches
+    updated = existing + matches
+    save_matches(updated)
+
+    return {"saved": len(matches), "total": len(updated)}
+
+
+@app.delete("/matches")
+def delete_tournament_matches(tourney: str):
+    """Delete all matches for a specific tournament."""
+    existing = load_matches()
+    updated = [m for m in existing if m.get("tourney", "") != tourney]
+    save_matches(updated)
+    return {"deleted": len(existing) - len(updated), "remaining": len(updated)}
+
+
+@app.get("/matches/summary")
+def matches_summary():
+    """Returns a quick summary — useful for admin dashboard."""
+    matches = load_matches()
+    tourneys = {}
+    for m in matches:
+        t = m.get("tourney", "Unknown")
+        if t not in tourneys:
+            tourneys[t] = {"total": 0, "green": 0, "amber": 0, "red": 0}
+        tourneys[t]["total"] += 1
+        sig = m.get("signal", "red")
+        tourneys[t][sig] += 1
+
+    return {
+        "total_matches": len(matches),
+        "tournaments": tourneys,
+        "signals": {
+            "green": sum(1 for m in matches if m.get("signal") == "green"),
+            "amber": sum(1 for m in matches if m.get("signal") == "amber"),
+            "red":   sum(1 for m in matches if m.get("signal") == "red"),
+        }
+    }
